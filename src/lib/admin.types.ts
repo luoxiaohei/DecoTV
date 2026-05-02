@@ -133,6 +133,10 @@ export interface AdminConfig {
   AdFilterConfig?: {
     enabled: boolean;
   };
+  TVBoxSecurityConfig?: {
+    enableAuth: boolean;
+    token: string;
+  };
 }
 
 export interface AdminConfigResult {

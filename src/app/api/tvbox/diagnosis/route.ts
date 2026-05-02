@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+import { verifyTvboxAccess } from '@/lib/tvbox-auth';
+
 export const runtime = 'nodejs';
 
 // TVBox配置体检端点
 export async function GET(req: NextRequest) {
   try {
+    if (!(await verifyTvboxAccess(req))) {
+      return new NextResponse(null, { status: 404 });
+    }
     const { searchParams } = new URL(req.url);
     const mode = searchParams.get('mode') || 'standard';
 

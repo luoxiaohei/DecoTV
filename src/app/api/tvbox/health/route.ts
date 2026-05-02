@@ -1,10 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+import { verifyTvboxAccess } from '@/lib/tvbox-auth';
+
 export const runtime = 'nodejs';
 
 // Spider jar健康检查端点
 export async function GET(req: NextRequest) {
   try {
+    if (!(await verifyTvboxAccess(req))) {
+      return new NextResponse(null, { status: 404 });
+    }
     const { searchParams } = new URL(req.url);
     const jarUrl = searchParams.get('url');
 

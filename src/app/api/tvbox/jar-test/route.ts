@@ -3,7 +3,15 @@
  * 提供友好的 HTML 界面展示诊断结果
  */
 
-export async function GET() {
+import type { NextRequest } from 'next/server';
+import { NextResponse } from 'next/server';
+
+import { verifyTvboxAccess } from '@/lib/tvbox-auth';
+
+export async function GET(req: NextRequest) {
+  if (!(await verifyTvboxAccess(req))) {
+    return new NextResponse(null, { status: 404 });
+  }
   const html = `
 <!DOCTYPE html>
 <html lang="zh-CN" class="dark">
@@ -115,7 +123,8 @@ export async function GET() {
             \`;
 
             try {
-                const response = await fetch('/api/tvbox/jar-diagnostic');
+                // 使用相对路径，自动继承当前页面的 token 前缀（若启用了自定义路径）
+                const response = await fetch('jar-diagnostic');
                 const data = await response.json();
 
                 renderResults(data);

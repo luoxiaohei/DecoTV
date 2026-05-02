@@ -5,6 +5,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getConfig } from '@/lib/config';
 import { searchFromApi } from '@/lib/downstream';
 import { rankSearchResults } from '@/lib/search-ranking';
+import { verifyTvboxAccess } from '@/lib/tvbox-auth';
 import { yellowWords } from '@/lib/yellow';
 
 export const runtime = 'nodejs';
@@ -52,6 +53,9 @@ export async function GET(request: NextRequest) {
   const startTime = Date.now();
 
   try {
+    if (!(await verifyTvboxAccess(request))) {
+      return new NextResponse(null, { status: 404 });
+    }
     const { searchParams } = new URL(request.url);
     const sourceKey = searchParams.get('source');
     const query = searchParams.get('wd');
