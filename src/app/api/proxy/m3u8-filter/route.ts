@@ -2,7 +2,8 @@
 
 import { NextResponse } from 'next/server';
 
-import { filterM3U8 } from '@/lib/ad-filter';
+import { DEFAULT_AD_FILTER_CONFIG, filterM3U8 } from '@/lib/ad-filter';
+import { getConfig } from '@/lib/config';
 import { getBaseUrl, resolveUrl } from '@/lib/live';
 
 export const runtime = 'nodejs';
@@ -13,26 +14,69 @@ const DEFAULT_UA =
 
 const FETCH_TIMEOUT_MS = 8000;
 
-function isAdFilterEnabled(): boolean {
+/**
+ * 解析广告过滤是否启用：admin 后台开关 > 环境变量 > 默认开。
+ * 后台未配置时回落到 ENABLE_AD_FILTER；都没配置时默认 true。
+ */
+async function isAdFilterEnabled(): Promise<boolean> {
+  try {
+    const cfg = await getConfig();
+    if (typeof cfg?.AdFilterConfig?.enabled === 'boolean') {
+      return cfg.AdFilterConfig.enabled;
+    }
+  } catch {
+    // ignore - fallback to env
+  }
   const flag = process.env.ENABLE_AD_FILTER;
-  if (flag === undefined) return true; // 默认开
+  if (flag === undefined) return true;
   return flag === 'true' || flag === '1';
 }
 
-function buildProxyUrl(request: Request, upstreamUrl: string): string {
-  const referer = request.headers.get('referer');
-  let protocol = 'http';
-  if (referer) {
-    try {
-      protocol = new URL(referer).protocol.replace(':', '');
-    } catch {
-      // ignore
-    }
-  }
+/**
+ * 高级用户可通过环境变量重载广告判定阈值（不在管理 UI 暴露）：
+ *   AD_FILTER_MIN_DURATION  / AD_FILTER_MAX_DURATION  / AD_FILTER_MAX_SEGMENTS
+ */
+function buildFilterConfigFromEnv() {
+  const parseNum = (v: string | undefined, fallback: number): number => {
+    if (!v) return fallback;
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : fallback;
+  };
+  return {
+    ...DEFAULT_AD_FILTER_CONFIG,
+    minAdDuration: parseNum(
+      process.env.AD_FILTER_MIN_DURATION,
+      DEFAULT_AD_FILTER_CONFIG.minAdDuration,
+    ),
+    maxAdDuration: parseNum(
+      process.env.AD_FILTER_MAX_DURATION,
+      DEFAULT_AD_FILTER_CONFIG.maxAdDuration,
+    ),
+    maxConsecutiveAdSegments: parseNum(
+      process.env.AD_FILTER_MAX_SEGMENTS,
+      DEFAULT_AD_FILTER_CONFIG.maxConsecutiveAdSegments,
+    ),
+  };
+}
+
+function buildProxyUrl(
+  request: Request,
+  upstreamUrl: string,
+  referer?: string,
+): string {
   const host = request.headers.get('host');
-  return `${protocol}://${host}/api/proxy/m3u8-filter?url=${encodeURIComponent(
-    upstreamUrl,
-  )}`;
+  const protocol =
+    request.headers.get('x-forwarded-proto') ||
+    (() => {
+      try {
+        return new URL(request.url).protocol.replace(':', '');
+      } catch {
+        return 'http';
+      }
+    })();
+  let qs = `url=${encodeURIComponent(upstreamUrl)}`;
+  if (referer) qs += `&referer=${encodeURIComponent(referer)}`;
+  return `${protocol}://${host}/api/proxy/m3u8-filter?${qs}`;
 }
 
 /**
@@ -43,6 +87,7 @@ function rewriteMasterPlaylist(
   content: string,
   baseUrl: string,
   request: Request,
+  referer?: string,
 ): string {
   const lines = content.split('\n');
   const out: string[] = [];
@@ -57,7 +102,7 @@ function rewriteMasterPlaylist(
         const variantLine = lines[i + 1].trim();
         if (variantLine && !variantLine.startsWith('#')) {
           const absolute = resolveUrl(baseUrl, variantLine);
-          out.push(buildProxyUrl(request, absolute));
+          out.push(buildProxyUrl(request, absolute, referer));
           i++;
           continue;
         }
@@ -132,6 +177,30 @@ export async function GET(request: Request) {
 
   const ua = request.headers.get('user-agent') || DEFAULT_UA;
 
+  // 上游资源站常按 Referer/Origin 做白名单校验。优先级：
+  //   1. URL 显式参数 ?referer=...（客户端已知最准确的来源）
+  //   2. 入站请求自带的 Referer（浏览器自然发出的）
+  //   3. 上游 URL 自身的 origin 作为兜底（很多源站允许同源 Referer）
+  const explicitReferer = searchParams.get('referer') || undefined;
+  const inboundReferer = request.headers.get('referer') || undefined;
+  let fallbackReferer: string | undefined;
+  try {
+    fallbackReferer = new URL(decodedUrl).origin + '/';
+  } catch {
+    fallbackReferer = undefined;
+  }
+  const refererToSend = explicitReferer || inboundReferer || fallbackReferer;
+
+  const upstreamHeaders: Record<string, string> = { 'User-Agent': ua };
+  if (refererToSend) {
+    upstreamHeaders['Referer'] = refererToSend;
+    try {
+      upstreamHeaders['Origin'] = new URL(refererToSend).origin;
+    } catch {
+      // ignore
+    }
+  }
+
   let upstream: Response;
   try {
     upstream = await fetchWithTimeout(
@@ -139,7 +208,7 @@ export async function GET(request: Request) {
       {
         cache: 'no-store',
         redirect: 'follow',
-        headers: { 'User-Agent': ua },
+        headers: upstreamHeaders,
       },
       FETCH_TIMEOUT_MS,
     );
@@ -167,11 +236,18 @@ export async function GET(request: Request) {
   let adsDuration = 0;
 
   if (content.includes('#EXT-X-STREAM-INF')) {
-    body = rewriteMasterPlaylist(content, baseUrl, request);
+    // 把当前请求用的 referer 透传到变体 URL 的代理参数里，
+    // 否则下一跳又会因为没有 Referer 被上游拒
+    body = rewriteMasterPlaylist(content, baseUrl, request, refererToSend);
   } else {
     const absolute = absolutizeVariantPlaylist(content, baseUrl);
-    if (isAdFilterEnabled()) {
-      const result = filterM3U8(absolute);
+    // 调试/对照场景：?adfilter=false 让代理只做 referer 透传 + 相对路径绝对化，
+    // 不删任何广告段，方便客户端拿到原始时间轴
+    const queryDisable =
+      searchParams.get('adfilter') === 'false' ||
+      searchParams.get('adfilter') === '0';
+    if ((await isAdFilterEnabled()) && !queryDisable) {
+      const result = filterM3U8(absolute, buildFilterConfigFromEnv());
       body = result.filtered;
       adsRemoved = result.adsRemoved;
       adsDuration = result.adsDuration;
