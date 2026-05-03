@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { verifyTvboxAccess } from '@/lib/tvbox-auth';
 
+export const runtime = 'nodejs';
+
 /**
  * TVBox JAR 深度诊断 API
  * 提供详细的 JAR 源测试报告和网络环境分析

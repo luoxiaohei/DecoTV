@@ -9737,6 +9737,15 @@ function AdminPageClient() {
     return `${baseUrl}/api/tvbox${tokenSegment}/config?format=${tvboxFormat}${modeParam}`;
   };
 
+  // admin 内部工具调用 tvbox endpoint 时的相对路径前缀
+  // toggle 打开后默认路径会被守卫 404，所以这些工具也得走 token 前缀
+  const getTvboxApiPath = (endpoint: string) => {
+    const sec = config?.TVBoxSecurityConfig;
+    const tokenSegment =
+      sec?.enableAuth && sec.token ? `/${encodeURIComponent(sec.token)}` : '';
+    return `/api/tvbox${tokenSegment}/${endpoint}`;
+  };
+
   const handleTvboxCopy = async () => {
     try {
       const url = getTvboxConfigUrl();
@@ -9822,7 +9831,7 @@ function AdminPageClient() {
   const handleDiagnosis = async () => {
     setIsDiagnosing(true);
     try {
-      const response = await fetch('/api/tvbox/diagnose');
+      const response = await fetch(getTvboxApiPath('diagnose'));
       const result = await response.json();
       setDiagnosisResult(result);
 
@@ -9873,7 +9882,7 @@ function AdminPageClient() {
   const handleCheckJarStatus = async () => {
     setIsCheckingJar(true);
     try {
-      const response = await fetch('/api/tvbox/spider-status');
+      const response = await fetch(getTvboxApiPath('spider-status'));
       const result = await response.json();
       setJarStatus(result);
 
@@ -9909,7 +9918,7 @@ function AdminPageClient() {
   const handleRefreshJar = async () => {
     setIsRefreshingJar(true);
     try {
-      const response = await fetch('/api/tvbox/spider-status', {
+      const response = await fetch(getTvboxApiPath('spider-status'), {
         method: 'POST',
       });
       const result = await response.json();
@@ -10766,7 +10775,7 @@ function AdminPageClient() {
                     <div className='mt-3 grid grid-cols-2 gap-2'>
                       <button
                         onClick={() =>
-                          window.open('/api/tvbox/jar-diagnostic', '_blank')
+                          window.open(getTvboxApiPath('jar-diagnostic'), '_blank')
                         }
                         className='px-2 py-1.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded text-xs font-medium hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors text-center'
                       >
@@ -10774,7 +10783,7 @@ function AdminPageClient() {
                       </button>
                       <button
                         onClick={() =>
-                          window.open('/api/tvbox/jar-test', '_blank')
+                          window.open(getTvboxApiPath('jar-test'), '_blank')
                         }
                         className='px-2 py-1.5 bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-300 rounded text-xs font-medium hover:bg-teal-200 dark:hover:bg-teal-900/50 transition-colors text-center'
                       >

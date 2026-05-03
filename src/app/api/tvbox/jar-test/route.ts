@@ -8,6 +8,8 @@ import { NextResponse } from 'next/server';
 
 import { verifyTvboxAccess } from '@/lib/tvbox-auth';
 
+export const runtime = 'nodejs';
+
 export async function GET(req: NextRequest) {
   if (!(await verifyTvboxAccess(req))) {
     return new NextResponse(null, { status: 404 });
