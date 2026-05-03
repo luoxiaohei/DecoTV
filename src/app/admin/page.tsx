@@ -10841,6 +10841,9 @@ function AdminPageClient() {
         message={alertModal.message}
         timer={alertModal.timer}
         showConfirm={alertModal.showConfirm}
+        onConfirm={alertModal.onConfirm}
+        confirmText={alertModal.confirmText}
+        cancelText={alertModal.cancelText}
       />
 
       {/* 重置配置确认弹窗 */}
