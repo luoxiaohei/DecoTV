@@ -1,6 +1,8 @@
+import type { NextRequest } from 'next/server';
 import { NextResponse } from 'next/server';
 
 import { getSpiderJar, getSpiderStatus } from '@/lib/spiderJar';
+import { verifyTvboxAccess } from '@/lib/tvbox-auth';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic'; // 强制动态渲染，避免构建时获取JAR超时
@@ -9,8 +11,11 @@ export const dynamic = 'force-dynamic'; // 强制动态渲染，避免构建时�
  * Spider JAR 状态检查 API
  * 提供详细的 JAR 获取状态和诊断信息
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
+    if (!(await verifyTvboxAccess(req))) {
+      return new NextResponse(null, { status: 404 });
+    }
     const currentStatus = getSpiderStatus();
 
     // 强制刷新获取最新状态
@@ -69,8 +74,11 @@ export async function GET() {
 /**
  * 手动刷新 JAR 缓存
  */
-export async function POST() {
+export async function POST(req: NextRequest) {
   try {
+    if (!(await verifyTvboxAccess(req))) {
+      return new NextResponse(null, { status: 404 });
+    }
     const refreshedJar = await getSpiderJar(true);
 
     return NextResponse.json({

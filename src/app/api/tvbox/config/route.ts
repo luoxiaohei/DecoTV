@@ -4,6 +4,8 @@ import { NextRequest, NextResponse } from 'next/server';
 
 import { getConfig } from '@/lib/config';
 import { getSpiderJar } from '@/lib/spiderJar';
+import { verifyTvboxAccess } from '@/lib/tvbox-auth';
+import { buildTvboxBasePath } from '@/lib/tvbox-security';
 
 // ================= Spider 公共可达 & 回退缓存逻辑 =================
 // 目的：避免出现 “spider url is private/not public” & 404 问题
@@ -119,6 +121,9 @@ function detectApiType(api: string): number {
 
 export async function GET(req: NextRequest) {
   try {
+    if (!(await verifyTvboxAccess(req))) {
+      return new NextResponse(null, { status: 404 });
+    }
     const { searchParams, href } = new URL(req.url);
     const format = searchParams.get('format') || 'json';
     const mode = (searchParams.get('mode') || '').toLowerCase(); // 可选: safe|min|yingshicang
@@ -297,9 +302,15 @@ export async function GET(req: NextRequest) {
         // 保存原始API供代理使用
         site.original_api = site.api;
 
+        // 当启用了 TVBox 自定义路径鉴权时，把 search 代理也放在同一 token 前缀下，
+        // 否则外部扫描会发现可绕过的 /api/tvbox/search。
+        const tvboxBase = `${baseUrl}${buildTvboxBasePath(
+          cfg.TVBoxSecurityConfig,
+        )}`;
+
         // 替换为智能搜索代理端点
         // TVBox会在URL后拼接搜索关键词，格式：api + wd={keyword}
-        site.api = `${baseUrl}/api/tvbox/search?source=${encodeURIComponent(
+        site.api = `${tvboxBase}/search?source=${encodeURIComponent(
           s.key,
         )}&filter=${shouldFilterAdult ? 'on' : 'off'}&wd=`;
 

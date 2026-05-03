@@ -1,6 +1,10 @@
 /* eslint-disable no-console, @typescript-eslint/no-explicit-any */
 import { NextRequest, NextResponse } from 'next/server';
 
+import { getConfig } from '@/lib/config';
+import { verifyTvboxAccess } from '@/lib/tvbox-auth';
+import { buildTvboxBasePath } from '@/lib/tvbox-security';
+
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic'; // 强制动态渲染，需要运行时请求头信息
 
@@ -77,6 +81,9 @@ async function tryFetchHead(
 
 export async function GET(req: NextRequest) {
   try {
+    if (!(await verifyTvboxAccess(req))) {
+      return new NextResponse(null, { status: 404 });
+    }
     const baseUrl = getBaseUrl(req);
     if (!baseUrl) {
       return NextResponse.json(
@@ -85,7 +92,10 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    const configUrl = `${baseUrl}/api/tvbox/config?format=json&mode=safe`;
+    // 当启用 TVBox 自定义路径鉴权时，自检要走带 token 的路径，否则会被守卫拦下
+    const cfg = await getConfig();
+    const tvboxBase = `${baseUrl}${buildTvboxBasePath(cfg.TVBoxSecurityConfig)}`;
+    const configUrl = `${tvboxBase}/config?format=json&mode=safe`;
     const cfgRes = await fetch(configUrl, { cache: 'no-store' });
     const contentType = cfgRes.headers.get('content-type') || '';
     const text = await cfgRes.text();

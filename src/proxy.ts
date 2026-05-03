@@ -3,9 +3,29 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 import { getAuthInfoFromCookie } from '@/lib/auth';
+import { TVBOX_ENDPOINT_SET, TVBOX_TOKEN_HEADER } from '@/lib/tvbox-security';
+
+// 匹配 /api/tvbox/<token>/<endpoint>，<endpoint> 必须是已知端点名
+// 例如 /api/tvbox/Abc123_/config -> 重写到 /api/tvbox/config
+const TVBOX_TOKEN_PATH_RE = /^\/api\/tvbox\/([^/]+)\/([^/]+)\/?$/;
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
+
+  // TVBox 自定义路径重写：/api/tvbox/<token>/<endpoint> -> /api/tvbox/<endpoint>
+  // 把候选 token 通过请求头传给路由，由路由的 verifyTvboxAccess 校验
+  const tvboxMatch = pathname.match(TVBOX_TOKEN_PATH_RE);
+  if (tvboxMatch && TVBOX_ENDPOINT_SET.has(tvboxMatch[2])) {
+    const candidateToken = tvboxMatch[1];
+    const endpoint = tvboxMatch[2];
+    const url = request.nextUrl.clone();
+    url.pathname = `/api/tvbox/${endpoint}`;
+    const requestHeaders = new Headers(request.headers);
+    requestHeaders.set(TVBOX_TOKEN_HEADER, candidateToken);
+    return NextResponse.rewrite(url, {
+      request: { headers: requestHeaders },
+    });
+  }
 
   // 处理成人内容模式路径重写
   // 如果路径以 /adult/ 开头，重写到实际 API 路径并添加 adult 标记
@@ -148,8 +168,8 @@ function shouldSkipAuth(pathname: string): boolean {
     '/icons/',
     '/logo.png',
     '/screenshot.png',
-    '/api/tvbox/config',
-    '/api/tvbox/diagnose',
+    // TVBox 端点的鉴权由路由内的 verifyTvboxAccess 统一处理（支持自定义 token 路径）
+    '/api/tvbox/',
     '/register', // 允许访问注册页面
   ];
 

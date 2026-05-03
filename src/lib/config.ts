@@ -5,6 +5,10 @@ import { db } from '@/lib/db';
 import { AdminConfig } from './admin.types';
 import { getDefaultPanSouConfig, normalizePanSouConfig } from './pansou';
 import { normalizePrivateLibraryConfig } from './private-library-config';
+import {
+  getDefaultTVBoxSecurityConfig,
+  normalizeTVBoxSecurityConfig,
+} from './tvbox-security';
 
 export interface ApiSite {
   key: string;
@@ -319,6 +323,7 @@ async function getInitConfig(
     PrivateLibraryConfig: {
       connectors: [],
     },
+    TVBoxSecurityConfig: getDefaultTVBoxSecurityConfig(),
   };
 
   // 补充用户信息
@@ -450,6 +455,7 @@ export function getLocalModeConfig(): AdminConfig {
     PrivateLibraryConfig: {
       connectors: [],
     },
+    TVBoxSecurityConfig: getDefaultTVBoxSecurityConfig(),
   };
   return adminConfig;
 }
@@ -543,6 +549,10 @@ export function configSelfCheck(adminConfig: AdminConfig): AdminConfig {
   );
 
   adminConfig.PanSouConfig = normalizePanSouConfig(adminConfig.PanSouConfig);
+
+  adminConfig.TVBoxSecurityConfig = normalizeTVBoxSecurityConfig(
+    adminConfig.TVBoxSecurityConfig,
+  );
 
   // 站长变更自检
   const ownerUser = process.env.USERNAME;

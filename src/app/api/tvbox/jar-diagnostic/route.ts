@@ -1,5 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+import { verifyTvboxAccess } from '@/lib/tvbox-auth';
+
+export const runtime = 'nodejs';
+
 /**
  * TVBox JAR 深度诊断 API
  * 提供详细的 JAR 源测试报告和网络环境分析
@@ -233,6 +237,9 @@ function detectEnvironment(request: NextRequest) {
 }
 
 export async function GET(request: NextRequest) {
+  if (!(await verifyTvboxAccess(request))) {
+    return new NextResponse(null, { status: 404 });
+  }
   const env = detectEnvironment(request);
 
   // 根据环境选择测试源

@@ -55,6 +55,12 @@ import {
 } from '@/lib/admin.types';
 import { getAuthInfoFromBrowserCookie } from '@/lib/auth';
 import { DEFAULT_PANSOU_SERVER_URL } from '@/lib/pansou';
+import {
+  generateTvboxToken,
+  isValidTvboxToken,
+  TVBOX_TOKEN_MAX_LENGTH,
+  TVBOX_TOKEN_MIN_LENGTH,
+} from '@/lib/tvbox-security';
 
 import DataMigration from '@/components/DataMigration';
 import type { ImportExportModalProps } from '@/components/ImportExportModal';
@@ -9560,6 +9566,14 @@ function AdminPageClient() {
   const [isRefreshingJar, setIsRefreshingJar] = useState(false);
   const [isCheckingJar, setIsCheckingJar] = useState(false);
 
+  // TVBox 自定义路径安全配置
+  const [tvboxSecurityDraft, setTvboxSecurityDraft] = useState<{
+    enableAuth: boolean;
+    token: string;
+  }>({ enableAuth: false, token: '' });
+  const [isSavingTvboxSecurity, setIsSavingTvboxSecurity] = useState(false);
+  const [tvboxTokenVisible, setTvboxTokenVisible] = useState(false);
+
   // localStorage 键名常量
   const LOCAL_CONFIG_KEY = 'decotv_admin_config';
 
@@ -9681,6 +9695,17 @@ function AdminPageClient() {
     fetchConfig(true);
   }, [fetchConfig]);
 
+  // 配置加载完成后，把 TVBox 安全配置同步到草稿状态
+  useEffect(() => {
+    const sec = config?.TVBoxSecurityConfig;
+    if (sec) {
+      setTvboxSecurityDraft({
+        enableAuth: !!sec.enableAuth && !!sec.token,
+        token: sec.token || '',
+      });
+    }
+  }, [config?.TVBoxSecurityConfig]);
+
   // 切换标签展开状态
   const toggleTab = (tabKey: string) => {
     setExpandedTabs((prev) => ({
@@ -9690,6 +9715,7 @@ function AdminPageClient() {
   };
 
   // TVBox 配置相关函数
+  // 注意：URL 上展示的是【已保存】的 token，未保存的草稿不会立刻生效
   const getTvboxConfigUrl = () => {
     // 优先使用显式配置的公网基址，避免出现 0.0.0.0、localhost 等不可用地址
     const envBase = (process.env.NEXT_PUBLIC_SITE_BASE || '')
@@ -9703,9 +9729,21 @@ function AdminPageClient() {
         baseUrl = '';
       }
     }
+    const sec = config?.TVBoxSecurityConfig;
+    const tokenSegment =
+      sec?.enableAuth && sec.token ? `/${encodeURIComponent(sec.token)}` : '';
     // 始终附带 format 参数，确保 JSON 时为 ?format=json
     const modeParam = tvboxMode !== 'standard' ? `&mode=${tvboxMode}` : '';
-    return `${baseUrl}/api/tvbox/config?format=${tvboxFormat}${modeParam}`;
+    return `${baseUrl}/api/tvbox${tokenSegment}/config?format=${tvboxFormat}${modeParam}`;
+  };
+
+  // admin 内部工具调用 tvbox endpoint 时的相对路径前缀
+  // toggle 打开后默认路径会被守卫 404，所以这些工具也得走 token 前缀
+  const getTvboxApiPath = (endpoint: string) => {
+    const sec = config?.TVBoxSecurityConfig;
+    const tokenSegment =
+      sec?.enableAuth && sec.token ? `/${encodeURIComponent(sec.token)}` : '';
+    return `/api/tvbox${tokenSegment}/${endpoint}`;
   };
 
   const handleTvboxCopy = async () => {
@@ -9718,11 +9756,82 @@ function AdminPageClient() {
     }
   };
 
+  // 随机生成一个 TVBox 路径 token，仅写入草稿，不会自动保存
+  const handleTvboxGenerateToken = () => {
+    setTvboxSecurityDraft((prev) => ({
+      ...prev,
+      token: generateTvboxToken(),
+    }));
+    setTvboxTokenVisible(true);
+  };
+
+  // 保存 TVBox 安全配置（启用/关闭 + token）
+  const handleTvboxSaveSecurity = async () => {
+    const draft = tvboxSecurityDraft;
+    if (draft.enableAuth) {
+      if (!draft.token) {
+        showError('启用自定义路径前请先填写或生成 token', showAlert);
+        return;
+      }
+      if (!isValidTvboxToken(draft.token)) {
+        showError(
+          `token 仅允许字母/数字/下划线/短横线，长度 ${TVBOX_TOKEN_MIN_LENGTH}-${TVBOX_TOKEN_MAX_LENGTH}`,
+          showAlert,
+        );
+        return;
+      }
+    }
+
+    setIsSavingTvboxSecurity(true);
+    try {
+      const response = await fetch('/api/admin/tvbox', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enableAuth: draft.enableAuth,
+          token: draft.token,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(data?.error || `HTTP ${response.status}`);
+      }
+
+      // 本地模式后端不持久化，只更新前端 config 缓存即可
+      if (data.storageMode === 'local') {
+        setConfig((prev) =>
+          prev
+            ? {
+                ...prev,
+                TVBoxSecurityConfig: data.TVBoxSecurityConfig,
+              }
+            : prev,
+        );
+        showSuccess('已保存（本地模式）', showAlert);
+      } else {
+        await refreshConfigAfterMutation();
+        showSuccess(
+          draft.enableAuth
+            ? '已启用 TVBox 自定义路径，订阅地址已更新'
+            : '已关闭 TVBox 自定义路径，恢复默认地址',
+          showAlert,
+        );
+      }
+    } catch (error) {
+      showError(
+        `保存失败：${error instanceof Error ? error.message : '未知错误'}`,
+        showAlert,
+      );
+    } finally {
+      setIsSavingTvboxSecurity(false);
+    }
+  };
+
   // 连通性体检功能
   const handleDiagnosis = async () => {
     setIsDiagnosing(true);
     try {
-      const response = await fetch('/api/tvbox/diagnose');
+      const response = await fetch(getTvboxApiPath('diagnose'));
       const result = await response.json();
       setDiagnosisResult(result);
 
@@ -9773,7 +9882,7 @@ function AdminPageClient() {
   const handleCheckJarStatus = async () => {
     setIsCheckingJar(true);
     try {
-      const response = await fetch('/api/tvbox/spider-status');
+      const response = await fetch(getTvboxApiPath('spider-status'));
       const result = await response.json();
       setJarStatus(result);
 
@@ -9809,7 +9918,7 @@ function AdminPageClient() {
   const handleRefreshJar = async () => {
     setIsRefreshingJar(true);
     try {
-      const response = await fetch('/api/tvbox/spider-status', {
+      const response = await fetch(getTvboxApiPath('spider-status'), {
         method: 'POST',
       });
       const result = await response.json();
@@ -10299,6 +10408,104 @@ function AdminPageClient() {
                   </div>
                 </div>
 
+                {/* 自定义路径 / 路径鉴权（防扫描） */}
+                <div className='bg-white dark:bg-gray-800 rounded-xl border border-gray-200 dark:border-gray-700 shadow-sm overflow-hidden'>
+                  <div className='p-5 border-b border-gray-100 dark:border-gray-700/50 bg-gray-50/50 dark:bg-gray-800/50 flex items-start justify-between gap-3'>
+                    <div>
+                      <h3 className='text-base font-semibold text-gray-900 dark:text-gray-100 flex items-center gap-2'>
+                        <span className='text-xl'>🛡️</span>
+                        自定义订阅路径
+                      </h3>
+                      <p className='text-sm text-gray-500 dark:text-gray-400 mt-1'>
+                        启用后，原 <code className='px-1 py-0.5 bg-gray-100 dark:bg-gray-900 rounded text-xs'>/api/tvbox/config</code> 会变成 <code className='px-1 py-0.5 bg-gray-100 dark:bg-gray-900 rounded text-xs'>/api/tvbox/&lt;token&gt;/config</code>，未带正确 token 的请求一律 404，避免被扫描器命中默认路径。
+                      </p>
+                    </div>
+                    <label className='flex items-center gap-2 cursor-pointer shrink-0'>
+                      <span className='text-xs text-gray-500 dark:text-gray-400'>
+                        启用
+                      </span>
+                      <span className='relative inline-flex h-6 w-11'>
+                        <input
+                          type='checkbox'
+                          className='sr-only peer'
+                          checked={tvboxSecurityDraft.enableAuth}
+                          onChange={(e) =>
+                            setTvboxSecurityDraft((prev) => ({
+                              ...prev,
+                              enableAuth: e.target.checked,
+                            }))
+                          }
+                        />
+                        <span className='absolute inset-0 rounded-full bg-gray-300 dark:bg-gray-600 peer-checked:bg-blue-600 transition-colors'></span>
+                        <span className='absolute top-0.5 left-0.5 w-5 h-5 bg-white rounded-full shadow transition-transform peer-checked:translate-x-5'></span>
+                      </span>
+                    </label>
+                  </div>
+
+                  <div className='p-5 space-y-4'>
+                    <div>
+                      <label className='block text-sm font-medium text-gray-700 dark:text-gray-300 mb-2'>
+                        路径 token
+                      </label>
+                      <div className='flex flex-col sm:flex-row gap-2'>
+                        <div className='relative grow'>
+                          <input
+                            type={tvboxTokenVisible ? 'text' : 'password'}
+                            placeholder={`长度 ${TVBOX_TOKEN_MIN_LENGTH}-${TVBOX_TOKEN_MAX_LENGTH}，字母/数字/下划线/短横线`}
+                            className='w-full pl-4 pr-20 py-3 rounded-lg bg-gray-50 dark:bg-gray-900/50 text-gray-700 dark:text-gray-200 border border-gray-200 dark:border-gray-700 focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all font-mono text-sm'
+                            value={tvboxSecurityDraft.token}
+                            onChange={(e) =>
+                              setTvboxSecurityDraft((prev) => ({
+                                ...prev,
+                                token: e.target.value.trim(),
+                              }))
+                            }
+                          />
+                          <button
+                            type='button'
+                            onClick={() =>
+                              setTvboxTokenVisible((v) => !v)
+                            }
+                            className='absolute right-3 top-1/2 -translate-y-1/2 text-xs text-gray-500 dark:text-gray-400 hover:text-blue-500'
+                          >
+                            {tvboxTokenVisible ? '隐藏' : '显示'}
+                          </button>
+                        </div>
+                        <div className='flex gap-2 shrink-0'>
+                          <button
+                            type='button'
+                            onClick={handleTvboxGenerateToken}
+                            className='px-4 py-3 rounded-lg bg-purple-600 hover:bg-purple-700 text-white text-sm font-medium transition-colors'
+                          >
+                            随机生成
+                          </button>
+                          <button
+                            type='button'
+                            onClick={handleTvboxSaveSecurity}
+                            disabled={isSavingTvboxSecurity}
+                            className='px-4 py-3 rounded-lg bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 text-white text-sm font-medium transition-colors'
+                          >
+                            {isSavingTvboxSecurity ? '保存中…' : '保存'}
+                          </button>
+                        </div>
+                      </div>
+                      <p className='mt-2 text-xs text-gray-500 dark:text-gray-400'>
+                        填写后必须点击「保存」才会生效；保存后请记得在 TVBox 客户端把订阅地址替换为上方"订阅链接生成器"中的新地址。
+                      </p>
+                    </div>
+
+                    {tvboxSecurityDraft.enableAuth && tvboxSecurityDraft.token ? (
+                      <div className='rounded-lg border border-blue-200 dark:border-blue-800/40 bg-blue-50 dark:bg-blue-900/10 px-4 py-3 text-xs text-blue-700 dark:text-blue-300'>
+                        启用后，<code className='px-1 py-0.5 bg-white/70 dark:bg-blue-900/30 rounded'>/api/tvbox/config</code>（以及 search/diagnose 等所有子路径）将一律返回 404。需要诊断时请使用上方"订阅链接生成器"中的带 token 链接。
+                      </div>
+                    ) : (
+                      <div className='rounded-lg border border-amber-200 dark:border-amber-800/40 bg-amber-50 dark:bg-amber-900/10 px-4 py-3 text-xs text-amber-700 dark:text-amber-300'>
+                        当前使用默认路径 <code className='px-1 py-0.5 bg-white/70 dark:bg-amber-900/30 rounded'>/api/tvbox/...</code>，容易被互联网扫描器探测。建议生成一个 token 并启用自定义路径。
+                      </div>
+                    )}
+                  </div>
+                </div>
+
                 {/* 中部：成人内容过滤 (保持原有风格但微调) */}
                 <div className='bg-linear-to-br from-pink-50 to-rose-50 dark:from-pink-900/10 dark:to-rose-900/10 rounded-xl border border-pink-100 dark:border-pink-800/30 p-1'>
                   <div className='bg-white/50 dark:bg-gray-800/50 rounded-lg p-4 backdrop-blur-sm'>
@@ -10568,7 +10775,7 @@ function AdminPageClient() {
                     <div className='mt-3 grid grid-cols-2 gap-2'>
                       <button
                         onClick={() =>
-                          window.open('/api/tvbox/jar-diagnostic', '_blank')
+                          window.open(getTvboxApiPath('jar-diagnostic'), '_blank')
                         }
                         className='px-2 py-1.5 bg-purple-100 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 rounded text-xs font-medium hover:bg-purple-200 dark:hover:bg-purple-900/50 transition-colors text-center'
                       >
@@ -10576,7 +10783,7 @@ function AdminPageClient() {
                       </button>
                       <button
                         onClick={() =>
-                          window.open('/api/tvbox/jar-test', '_blank')
+                          window.open(getTvboxApiPath('jar-test'), '_blank')
                         }
                         className='px-2 py-1.5 bg-teal-100 dark:bg-teal-900/30 text-teal-700 dark:text-teal-300 rounded text-xs font-medium hover:bg-teal-200 dark:hover:bg-teal-900/50 transition-colors text-center'
                       >
