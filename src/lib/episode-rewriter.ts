@@ -2,6 +2,7 @@ import { NextRequest } from 'next/server';
 
 import { AdminConfig } from '@/lib/admin.types';
 import { getConfig } from '@/lib/config';
+import { signM3u8FilterToken } from '@/lib/m3u8-filter-token';
 import { SearchResult } from '@/lib/types';
 
 /**
@@ -21,15 +22,38 @@ function adFilterDisabledByQuery(request: NextRequest): boolean {
   return v === 'false' || v === '0';
 }
 
-function buildFilterProxyUrl(request: NextRequest, upstreamUrl: string): string {
+// 反代后 next 内部协议是 http，所以要从 forwarded 头里推真实协议；
+// 都拿不到时 fallback 到 https，避免 OrionTV 等原生客户端拿到 http URL
+// 被平台的明文流量策略 (Android cleartextTraffic / iOS ATS) 拒掉。
+function pickProtocol(request: NextRequest): string {
+  const xfp = request.headers.get('x-forwarded-proto');
+  if (xfp) return xfp.split(',')[0].trim();
+  const cfVisitor = request.headers.get('cf-visitor');
+  if (cfVisitor) {
+    try {
+      const parsed = JSON.parse(cfVisitor);
+      if (parsed && typeof parsed.scheme === 'string') return parsed.scheme;
+    } catch {
+      // ignore
+    }
+  }
+  if (request.headers.get('x-forwarded-ssl') === 'on') return 'https';
+  const proto = request.nextUrl.protocol.replace(':', '');
+  return proto || 'https';
+}
+
+async function buildFilterProxyUrl(
+  request: NextRequest,
+  upstreamUrl: string,
+): Promise<string> {
   const host = request.headers.get('host');
-  const protocol =
-    request.headers.get('x-forwarded-proto') ||
-    request.nextUrl.protocol.replace(':', '') ||
-    'http';
-  return `${protocol}://${host}/api/proxy/m3u8-filter?url=${encodeURIComponent(
-    upstreamUrl,
-  )}`;
+  const protocol = pickProtocol(request);
+  const token = await signM3u8FilterToken(upstreamUrl);
+  let qs = `url=${encodeURIComponent(upstreamUrl)}`;
+  if (token) {
+    qs += `&exp=${token.exp}&sig=${token.sig}`;
+  }
+  return `${protocol}://${host}/api/proxy/m3u8-filter?${qs}`;
 }
 
 function shouldRewriteEpisode(url: string): boolean {
@@ -50,13 +74,13 @@ function isSourceDisabled(
 
 /**
  * 把 SearchResult 的 episodes 数组里的 m3u8 URL 包成
- * /api/proxy/m3u8-filter?url=... 形式，过滤上游广告。
+ * /api/proxy/m3u8-filter?url=...&exp=...&sig=... 形式，过滤上游广告。
  *
  * 跳过条件：
- * - admin 后台关掉了广告过滤（或环境变量 ENABLE_AD_FILTER=false）
+ * - admin 后台关掉了广告过滤 (或环境变量 ENABLE_AD_FILTER=false)
  * - 客户端请求带 ?adfilter=false 显式禁用
  * - 该源在后台被标记为 disable_ad_filter
- * - source 是 private_library（私人影库已是内部代理 URL）
+ * - source 是 private_library (私人影库已是内部代理 URL)
  * - URL 不是 http/https 或不是 m3u8
  */
 export async function rewriteEpisodesForAdFilter<
@@ -71,8 +95,12 @@ export async function rewriteEpisodesForAdFilter<
   if (!Array.isArray(result.episodes) || result.episodes.length === 0)
     return result;
 
-  const rewritten = result.episodes.map((ep) =>
-    shouldRewriteEpisode(ep) ? buildFilterProxyUrl(request, ep) : ep,
+  const rewritten = await Promise.all(
+    result.episodes.map((ep) =>
+      shouldRewriteEpisode(ep)
+        ? buildFilterProxyUrl(request, ep)
+        : Promise.resolve(ep),
+    ),
   );
 
   return { ...result, episodes: rewritten };
@@ -87,15 +115,21 @@ export async function rewriteEpisodesForAdFilterMany(
     return results;
 
   // 对每条结果按"源是否豁免"独立判断
-  return results.map((r) => {
-    if (isSourceDisabled(adminConfig, r.source)) return r;
-    if (r.source === 'private_library') return r;
-    if (!Array.isArray(r.episodes) || r.episodes.length === 0) return r;
-    const rewritten = r.episodes.map((ep) =>
-      shouldRewriteEpisode(ep) ? buildFilterProxyUrl(request, ep) : ep,
-    );
-    return { ...r, episodes: rewritten };
-  });
+  return Promise.all(
+    results.map(async (r) => {
+      if (isSourceDisabled(adminConfig, r.source)) return r;
+      if (r.source === 'private_library') return r;
+      if (!Array.isArray(r.episodes) || r.episodes.length === 0) return r;
+      const rewritten = await Promise.all(
+        r.episodes.map((ep) =>
+          shouldRewriteEpisode(ep)
+            ? buildFilterProxyUrl(request, ep)
+            : Promise.resolve(ep),
+        ),
+      );
+      return { ...r, episodes: rewritten };
+    }),
+  );
 }
 
 async function safeGetConfig(): Promise<AdminConfig | null> {

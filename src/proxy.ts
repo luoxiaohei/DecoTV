@@ -170,6 +170,10 @@ function shouldSkipAuth(pathname: string): boolean {
     '/screenshot.png',
     // TVBox 端点的鉴权由路由内的 verifyTvboxAccess 统一处理（支持自定义 token 路径）
     '/api/tvbox/',
+    // m3u8 广告过滤代理：用自带的 HMAC ?exp=&sig= 自验签 (见 src/lib/m3u8-filter-token.ts)，
+    // 不依赖 cookie。原生播放器 (ExoPlayer / AVPlayer) 不会带 RN cookie jar，
+    // 走 cookie middleware 会全部 401，所以走代理路由内部的签名校验。
+    '/api/proxy/m3u8-filter',
     '/register', // 允许访问注册页面
   ];
 

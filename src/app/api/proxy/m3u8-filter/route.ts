@@ -5,6 +5,10 @@ import { NextResponse } from 'next/server';
 import { DEFAULT_AD_FILTER_CONFIG, filterM3U8 } from '@/lib/ad-filter';
 import { getConfig } from '@/lib/config';
 import { getBaseUrl, resolveUrl } from '@/lib/live';
+import {
+  signM3u8FilterToken,
+  verifyM3u8FilterToken,
+} from '@/lib/m3u8-filter-token';
 
 export const runtime = 'nodejs';
 
@@ -33,7 +37,7 @@ async function isAdFilterEnabled(): Promise<boolean> {
 }
 
 /**
- * 高级用户可通过环境变量重载广告判定阈值（不在管理 UI 暴露）：
+ * 高级用户可通过环境变量重载广告判定阈值 (不在管理 UI 暴露)：
  *   AD_FILTER_MIN_DURATION  / AD_FILTER_MAX_DURATION  / AD_FILTER_MAX_SEGMENTS
  */
 function buildFilterConfigFromEnv() {
@@ -59,36 +63,53 @@ function buildFilterConfigFromEnv() {
   };
 }
 
-function buildProxyUrl(
+function pickProtocol(request: Request): string {
+  const xfp = request.headers.get('x-forwarded-proto');
+  if (xfp) return xfp.split(',')[0].trim();
+  const cfVisitor = request.headers.get('cf-visitor');
+  if (cfVisitor) {
+    try {
+      const parsed = JSON.parse(cfVisitor);
+      if (parsed && typeof parsed.scheme === 'string') return parsed.scheme;
+    } catch {
+      // ignore
+    }
+  }
+  if (request.headers.get('x-forwarded-ssl') === 'on') return 'https';
+  try {
+    const proto = new URL(request.url).protocol.replace(':', '');
+    return proto || 'https';
+  } catch {
+    return 'https';
+  }
+}
+
+async function buildProxyUrl(
   request: Request,
   upstreamUrl: string,
   referer?: string,
-): string {
+): Promise<string> {
   const host = request.headers.get('host');
-  const protocol =
-    request.headers.get('x-forwarded-proto') ||
-    (() => {
-      try {
-        return new URL(request.url).protocol.replace(':', '');
-      } catch {
-        return 'http';
-      }
-    })();
+  const protocol = pickProtocol(request);
+  const token = await signM3u8FilterToken(upstreamUrl);
   let qs = `url=${encodeURIComponent(upstreamUrl)}`;
+  if (token) {
+    qs += `&exp=${token.exp}&sig=${token.sig}`;
+  }
   if (referer) qs += `&referer=${encodeURIComponent(referer)}`;
   return `${protocol}://${host}/api/proxy/m3u8-filter?${qs}`;
 }
 
 /**
- * 主播放列表（含 #EXT-X-STREAM-INF）：把每个变体 URL 改写为再次走本路由，
- * 这样客户端最终拿到的变体也会被过滤。
+ * 主播放列表 (含 #EXT-X-STREAM-INF)：把每个变体 URL 改写为再次走本路由，
+ * 这样客户端最终拿到的变体也会被过滤；变体 URL 也带新签名，否则下一跳 403。
  */
-function rewriteMasterPlaylist(
+async function rewriteMasterPlaylist(
   content: string,
   baseUrl: string,
   request: Request,
   referer?: string,
-): string {
+): Promise<string> {
   const lines = content.split('\n');
   const out: string[] = [];
 
@@ -102,7 +123,8 @@ function rewriteMasterPlaylist(
         const variantLine = lines[i + 1].trim();
         if (variantLine && !variantLine.startsWith('#')) {
           const absolute = resolveUrl(baseUrl, variantLine);
-          out.push(buildProxyUrl(request, absolute, referer));
+          // eslint-disable-next-line no-await-in-loop
+          out.push(await buildProxyUrl(request, absolute, referer));
           i++;
           continue;
         }
@@ -115,7 +137,7 @@ function rewriteMasterPlaylist(
 
 /**
  * 变体播放列表：把所有相对 URL 解析为上游绝对 URL，让播放器直连上游 CDN
- * 拉 TS（不消耗本服务带宽）。EXT-X-MAP/EXT-X-KEY 同样处理。
+ * 拉 TS (不消耗本服务带宽)。EXT-X-MAP/EXT-X-KEY 同样处理。
  */
 function absolutizeVariantPlaylist(content: string, baseUrl: string): string {
   const lines = content.split('\n');
@@ -175,12 +197,29 @@ export async function GET(request: Request) {
     );
   }
 
+  // 路由本身已经被 src/proxy.ts 的 shouldSkipAuth 跳过 cookie middleware，
+  // 必须自己做签名校验，否则会变成开放代理。签名由 episode-rewriter
+  // (或本路由的 master playlist 重写) 在生成 wrapped URL 时签发，TTL 24 小时。
+  const sigParam = searchParams.get('sig');
+  const expParam = searchParams.get('exp');
+  const exp = expParam ? parseInt(expParam, 10) : 0;
+  if (
+    !sigParam ||
+    !exp ||
+    !(await verifyM3u8FilterToken(decodedUrl, exp, sigParam))
+  ) {
+    return NextResponse.json(
+      { error: 'Forbidden: invalid or expired token' },
+      { status: 403 },
+    );
+  }
+
   const ua = request.headers.get('user-agent') || DEFAULT_UA;
 
   // 上游资源站常按 Referer/Origin 做白名单校验。优先级：
-  //   1. URL 显式参数 ?referer=...（客户端已知最准确的来源）
-  //   2. 入站请求自带的 Referer（浏览器自然发出的）
-  //   3. 上游 URL 自身的 origin 作为兜底（很多源站允许同源 Referer）
+  //   1. URL 显式参数 ?referer=... (客户端已知最准确的来源)
+  //   2. 入站请求自带的 Referer (浏览器自然发出的)
+  //   3. 上游 URL 自身的 origin 作为兜底 (很多源站允许同源 Referer)
   const explicitReferer = searchParams.get('referer') || undefined;
   const inboundReferer = request.headers.get('referer') || undefined;
   let fallbackReferer: string | undefined;
@@ -238,7 +277,7 @@ export async function GET(request: Request) {
   if (content.includes('#EXT-X-STREAM-INF')) {
     // 把当前请求用的 referer 透传到变体 URL 的代理参数里，
     // 否则下一跳又会因为没有 Referer 被上游拒
-    body = rewriteMasterPlaylist(content, baseUrl, request, refererToSend);
+    body = await rewriteMasterPlaylist(content, baseUrl, request, refererToSend);
   } else {
     const absolute = absolutizeVariantPlaylist(content, baseUrl);
     // 调试/对照场景：?adfilter=false 让代理只做 referer 透传 + 相对路径绝对化，
